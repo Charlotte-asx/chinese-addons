@@ -1,0 +1,17 @@
+{
+  "enabled": true,
+  "servers": {
+      "kubb": {
+  "enabled": true,
+  "version": 1,
+  "script": "kubb.js",
+  "name": "酷播 (Kubb)",
+  "base": "https://m.kubb.tv",
+  "idx": 0,
+  "desc": "海量高清视频免费在线观看",
+  "category": "movies",
+  "paginated": true,
+  "color": "#FF5722"
+      }
+  }
+}
