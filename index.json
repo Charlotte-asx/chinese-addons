@@ -3,7 +3,7 @@
   "servers": {
       "kubb": {
   "enabled": true,
-  "version": 7,
+  "version": 8,
   "script": "kubb.js",
   "name": "酷播 (Kubb)",
   "base": "https://m.kubb.tv",
