@@ -1,17 +1,22 @@
 {
   "enabled": true,
+  "name": "Mi Repo",
+  "links": {
+    "tiktok": "https://www.tiktok.com/@tu_usuario",
+    "telegram": "https://t.me/tu_canal"
+  },
   "servers": {
-      "kubb": {
-  "enabled": true,
-  "version": 8,
-  "script": "kubb.js",
-  "name": "酷播 (Kubb)",
-  "base": "https://m.kubb.tv",
-  "idx": 0,
-  "desc": "海量高清视频免费在线观看",
-  "category": "movies",
-  "paginated": true,
-  "color": "#FF5722"
-      }
+    "kubb": {
+      "enabled": true,
+      "version": 8,
+      "script": "kubb.js",
+      "name": "酷播 (Kubb)",
+      "base": "https://m.kubb.tv",
+      "idx": 0,
+      "desc": "海量高清视频免费在线观看",
+      "category": "movies",
+      "paginated": true,
+      "color": "#FF5722"
+    }
   }
 }
