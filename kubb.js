@@ -113,13 +113,9 @@ function list(page) {
 
 function search(query, page) {
     page = page || 1;
+    if (page > 1) return [];
     try {
-        var r = api("/api/list/getsmallvideo", {
-            videoType: 3,
-            page: page,
-            size: 20,
-            SearchCriteria: query
-        });
+        var r = api("/api/list/gettitlegetdata", { SearchCriteria: query });
         var items = [];
         findItems(r.json, items, 0);
         var cards = itemsToCards(items);
