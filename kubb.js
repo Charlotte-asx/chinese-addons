@@ -1,9 +1,16 @@
 /*
- * Kubb.tv — 酷播 (Películas y Series)
- * v4: Soporte para episodios (?id=) y extracción directa del JSON.
+ * Kubb.tv — 酷播 · v6 (API api.kubb.tv)
+ * detail  -> /api/video/videodetails (confirmado con tu JSON)
+ * servers -> /api/video/getplaydata  (respuesta sin ver: se busca el .m3u8 en el texto)
+ * list    -> /api/home/getrelativevideos (respuesta sin ver: parser genérico)
+ * search  -> pendiente (falta la URL XHR)
  */
 
 var BASE = String(CONFIG.base || "https://m.kubb.tv").replace(/\/+$/, "");
+var API = "https://api.kubb.tv";
+var DEVICE_ID = "f361b57d78c7586e378fda1613bd98b7";
+
+var RTMP = {}; // m3u8 de las slides del home (respaldo)
 
 function clean(s) {
     return util.htmlDecode(String(s || ""))
@@ -12,179 +19,183 @@ function clean(s) {
         .replace(/^\s+|\s+$/g, "");
 }
 
-function abs(u) {
-    u = String(u || "");
-    if (!u) return "";
-    if (/^https?:/i.test(u)) return u;
-    if (u.indexOf("//") === 0) return "https:" + u;
-    return BASE + (u.charAt(0) === "/" ? "" : "/") + u;
-}
-
-function getHeaders(referer) {
-    return {
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-        "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
-        "Referer": referer || (BASE + "/")
-    };
-}
-
 function get(url, referer) {
-    var h = http.get(url, getHeaders(referer));
+    var h = http.get(url, {
+        "Accept": "application/json, text/plain, */*",
+        "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+        "Origin": BASE,
+        "Referer": referer || (BASE + "/")
+    });
     if (!h) throw new Error("无响应 (HTTP " + http.status() + ") 来自 " + url);
     return h;
 }
 
-// La web inyecta el estado de Angular en el HTML (usualmente en un script o variable)
-function extractJsonData(html) {
-    // 1. Intentar la variable injectJson
-    var m = /var injectJson = (\{[\s\S]*?\});/.exec(html);
-    if (m) {
-        try { return JSON.parse(m[1]); } catch (e) {}
-    }
-    // 2. Intentar el estado inicial de la app (Angular/React)
-    m = /window\.__INITIAL_STATE__\s*=\s*(\{[\s\S]*?\});/.exec(html);
-    if (m) {
-        try { return JSON.parse(m[1]); } catch (e) {}
-    }
-    return null;
+// TODO: si el servidor exige "vv" (firma), hay que calcularlo aquí.
+function sign(query) { return ""; }
+
+function api(path, params) {
+    var q = [];
+    for (var k in params) q.push(k + "=" + encodeURIComponent(params[k]));
+    q.push("System=h5", "AppVersion=1.0", "SystemVersion=h5", "version=H3");
+    var base = q.join("&") + "&v=1&DeviceId=" + DEVICE_ID + "&i18n=0&pub=" + Math.floor(new Date().getTime() / 1000);
+    var vv = sign(base);
+    var url = API + path + "?" + base + (vv ? "&vv=" + vv : "");
+    var txt = get(url);
+    var j;
+    try { j = JSON.parse(txt); } catch (e) { throw new Error("JSON inválido de " + path + ": " + String(txt).substring(0, 120)); }
+    if (j.ret !== undefined && j.ret !== 200) log("kubb API " + path + " ret=" + j.ret + " msg=" + j.msg);
+    return { json: j, text: txt };
 }
 
-function parseCardList(data) {
-    var out = [];
-    if (!data) return out;
-    
-    // Iterar sobre las claves para encontrar arrays de videos
-    for (var key in data) {
-        if (Array.isArray(data[key]) && data[key].length > 0 && (data[key][0].url || data[key][0].path) && data[key][0].image) {
-            var items = data[key];
-            for (var i = 0; i < items.length; i++) {
-                var item = items[i];
-                var url = abs(item.url || item.path);
-                // Filtrar solo enlaces de reproducción
-                if (!url || url.indexOf("/play/") === -1) continue;
-                
-                // Agregar el ?id= si existe en el item original
-                if (item.id && url.indexOf("?id=") === -1) {
-                    url += "?id=" + item.id;
-                }
+function playParts(url) {
+    var u = String(url || "");
+    var m = /\/play\/([A-Za-z0-9]+)/.exec(u);
+    return {
+        mediaKey: m ? m[1] : null,
+        episodeKey: (/[?&]id=([A-Za-z0-9]+)/.exec(u) || [])[1] || "",
+        vid: (/[?&]vid=(\d+)/.exec(u) || [])[1] || "",
+        vt: (/[?&]vt=(\d+)/.exec(u) || [])[1] || "1"
+    };
+}
 
-                out.push({
-                    url: url,
-                    image: item.image || item.img || "",
-                    title: item.title || "无标题",
-                    type: "电影",
-                    kind: "movie"
-                });
-            }
-            if (out.length > 0) return out;
+// ---------- listado ----------
+
+function findItems(node, out, depth) {
+    if (!node || depth > 6) return;
+    if (Array.isArray(node)) {
+        if (node.length && node[0] && typeof node[0] === "object" && (node[0].mediaKey || node[0].listPath) && node[0].title) {
+            for (var i = 0; i < node.length; i++) out.push(node[i]);
+            return;
         }
+        for (var j = 0; j < node.length; j++) findItems(node[j], out, depth + 1);
+    } else if (typeof node === "object") {
+        for (var k in node) findItems(node[k], out, depth + 1);
+    }
+}
+
+function itemsToCards(items) {
+    var out = [], seen = {};
+    for (var i = 0; i < items.length; i++) {
+        var it = items[i];
+        var key = it.mediaKey || it.listPath;
+        if (!key || seen[key]) continue;
+        seen[key] = true;
+        if (it.rtmp) RTMP[key] = it.rtmp;
+        var t = String(it.typeName || it.subTitle || "");
+        var isSerie = t !== "" && t.indexOf("电影") !== 0;
+        out.push({
+            url: BASE + "/play/" + key,
+            image: it.coverImgUrl || it.img || it.image || it.cover || "",
+            title: clean(it.title) || "无标题",
+            type: isSerie ? "剧集" : "电影",
+            kind: isSerie ? "serie" : "movie"
+        });
     }
     return out;
+}
+
+function homeSlides() {
+    var html = get(BASE + "/list/movie");
+    var m = /var injectJson = (\{[\s\S]*?\});\s*<\/script>/.exec(html);
+    if (!m) return [];
+    var data;
+    try { data = JSON.parse(m[1]); } catch (e) { return []; }
+    var items = [];
+    findItems(data, items, 0);
+    return itemsToCards(items);
 }
 
 function list(page) {
     page = page || 1;
-    var url = BASE + "/list/movie" + (page > 1 ? "?page=" + page : "");
-    var html = get(url);
-    var data = extractJsonData(html);
-    return parseCardList(data);
+    try {
+        var r = api("/api/home/getrelativevideos", { titleid: 3, page: page });
+        var items = [];
+        findItems(r.json, items, 0);
+        var cards = itemsToCards(items);
+        if (cards.length) return cards;
+        log("kubb list: respuesta sin items reconocibles: " + r.text.substring(0, 300));
+    } catch (e) { log("kubb list: " + e); }
+    return page === 1 ? homeSlides() : [];
 }
 
 function search(query, page) {
-    // La búsqueda se hace vía XHR, pero el HTML inicial de /search a veces trae resultados
-    var url = BASE + "/search?keyword=" + encodeURIComponent(query);
-    var html = get(url);
-    var data = extractJsonData(html);
-    return parseCardList(data);
+    // TODO: falta la URL XHR de búsqueda.
+    log("kubb search: falta endpoint");
+    return [];
 }
 
+// ---------- detalle ----------
+
 function detail(pageUrl) {
-    // pageUrl podría ser: https://m.kubb.tv/play/iwE9ZcmnY15?id=MpcyLaQfMyi
-    var html = get(pageUrl);
-    var d = { isSeries: false, episodes: [] };
-    
-    var data = extractJsonData(html);
-    
-    if (data) {
-        // Intentar extraer el título
-        d.title = data.title || "酷播视频";
-        d.poster = data.image || data.img || "";
-        d.synopsis = data.description || data.desc || "";
+    var p = playParts(pageUrl);
+    if (!p.mediaKey) throw new Error("URL sin mediaKey: " + pageUrl);
 
-        // Extraer el m3u8 directo
-        var jsonStr = JSON.stringify(data);
-        var rtmpMatch = /"rtmp":"([^"]+\.m3u8[^"]*)"/.exec(jsonStr);
-        var m3u8 = rtmpMatch ? rtmpMatch[1].replace(/\\\//g, "/") : null;
+    var r = api("/api/video/videodetails", { mediaKey: p.mediaKey });
+    var info = r.json && r.json.data && r.json.data.detailInfo;
+    if (!info) throw new Error("videodetails sin detailInfo: " + r.text.substring(0, 200));
 
-        // Kubb.tv normalmente trata los episodios como listas dentro del JSON.
-        // Si el JSON tiene una lista de episodios (ej. data.episodes), la usamos.
-        var epList = data.episodes || data.list || data.videoList;
-        
-        if (epList && Array.isArray(epList) && epList.length > 0) {
-            d.isSeries = true;
-            for (var i = 0; i < epList.length; i++) {
-                var ep = epList[i];
-                var epId = ep.id || ep.vid;
-                var epUrl = BASE + "/play/" + (ep.pid || pageUrl.split("/").pop()) + (epId ? "?id=" + epId : "");
-                
-                d.episodes.push({
-                    url: epUrl,
-                    title: ep.title || ("第 " + (i+1) + " 集"),
-                    season: "1",
-                    episode: String(i+1),
-                    image: ep.image || ep.img || ""
-                });
-            }
-        } else {
-            // Es una película o un solo video
-            d.episodes.push({
-                url: pageUrl,
-                title: "立即播放",
-                season: "1",
-                episode: "1",
-                image: d.poster,
-                _m3u8: m3u8
-            });
-        }
-    } else {
-        // Fallback si no hay JSON
-        d.title = "酷播视频";
+    var eps = info.episodes || [];
+    var isMovie = String(info.typeName || "").indexOf("电影") === 0;
+    var d = {
+        title: clean(info.title),
+        poster: info.coverImgUrl || "",
+        year: info.postTime ? String(info.postTime).substring(0, 4) : "",
+        synopsis: clean(info.introduce),
+        isSeries: !isMovie && eps.length > 0,
+        episodes: []
+    };
+
+    for (var i = 0; i < eps.length; i++) {
+        var ep = eps[i];
         d.episodes.push({
-            url: pageUrl,
-            title: "立即播放",
+            url: BASE + "/play/" + (ep.mediaKey || p.mediaKey) + "?id=" + ep.episodeKey +
+                 "&vid=" + ep.episodeId + "&vt=" + (ep.videoType || 1),
+            title: isMovie ? "立即播放" : ("第 " + (ep.episodeTitle || (i + 1)) + " 集"),
             season: "1",
-            episode: "1",
-            image: ""
+            episode: String(parseInt(ep.episodeTitle, 10) || (i + 1)),
+            image: info.coverImgUrl || ""
         });
     }
-
+    if (d.episodes.length === 0) {
+        d.episodes.push({ url: pageUrl, title: "立即播放", season: "1", episode: "1", image: d.poster });
+    }
     return d;
 }
 
-function servers(episodeUrl) {
-    // episodeUrl será la que generamos en detail() o la original
-    var html = get(episodeUrl);
-    var data = extractJsonData(html);
-    var out = [];
+// ---------- servers ----------
 
-    if (data) {
-        var jsonStr = JSON.stringify(data);
-        // Buscar el enlace rtmp (m3u8)
-        var rtmpMatch = /"rtmp":"([^"]+\.m3u8[^"]*)"/.exec(jsonStr);
-        
-        if (rtmpMatch) {
-            var m3u8 = rtmpMatch[1].replace(/\\\//g, "/");
-            out.push({
-                url: m3u8,
-                name: "线路一 (HLS)",
-                referer: episodeUrl
-            });
-        }
+function servers(episodeUrl) {
+    var out = [];
+    var p = playParts(episodeUrl);
+    if (!p.mediaKey) return out;
+
+    // Si la URL no trae vid (ej. viene del home), se saca del primer episodio
+    if (!p.vid) {
+        try {
+            var dr = api("/api/video/videodetails", { mediaKey: p.mediaKey });
+            var e0 = dr.json.data.detailInfo.episodes[0];
+            p.vid = String(e0.episodeId);
+            p.vt = String(e0.videoType || 1);
+        } catch (e) { log("kubb servers detalle: " + e); }
     }
-    
-    if (out.length === 0) {
-        log("酷播: 无法提取 m3u8 链接. 页面数据可能由 JavaScript 异步加载.");
+
+    if (p.vid) {
+        try {
+            var r = api("/api/video/getplaydata", { mediaKey: p.mediaKey, videoId: p.vid, videoType: p.vt, liveLine: "" });
+            var txt = r.text.replace(/\\\//g, "/").replace(/\\u0026/g, "&");
+            var re = /https?:\/\/[^"'\s\\]+\.m3u8[^"'\s\\]*/g, m, seen = {};
+            while ((m = re.exec(txt)) !== null) {
+                if (seen[m[0]]) continue;
+                seen[m[0]] = true;
+                out.push({ url: m[0], name: "线路 " + (out.length + 1) + " (HLS)", referer: BASE + "/" });
+            }
+            if (out.length === 0) log("kubb getplaydata sin m3u8: " + r.text.substring(0, 400));
+        } catch (e) { log("kubb getplaydata: " + e); }
     }
-    
+
+    // respaldo: m3u8 de las slides del home
+    if (out.length === 0 && RTMP[p.mediaKey]) {
+        out.push({ url: RTMP[p.mediaKey], name: "线路一 (HLS)", referer: BASE + "/" });
+    }
     return out;
-    }
+}
